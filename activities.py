@@ -6,6 +6,7 @@ from datetime import timedelta
 import openai
 import json
 import os
+import asyncio
 
 CENTML_API_KEY = os.getenv("CENTML_API_KEY")
 
@@ -196,6 +197,101 @@ async def fetch_sessions(from_offset: Optional[int]) -> List[Dict]:
 
     return new_sessions
 
+async def async_filter(arr: list, predicate, concurrency: int = 1) -> list:
+    index = 0
+    results: list[bool] = [False] * len(arr) # Initialize results with False
+
+    async def worker():
+        nonlocal index
+        while index < len(arr):
+            current_index = index
+            index += 1
+            attempts = 0
+            while attempts < 2:
+                try:
+                    results[current_index] = await predicate(arr[current_index])
+                    break # Break out of retry loop on success
+                except Exception as error:
+                    print(error)
+                    print("Retrying item", current_index)
+                    attempts += 1
+            if attempts == 2: # Last attempt without retry loop
+                try:
+                    results[current_index] = await predicate(arr[current_index])
+                except Exception as error:
+                    print(error)
+                    print("Retrying item", current_index)
+
+    workers = [asyncio.create_task(worker()) for _ in range(concurrency)]
+    await asyncio.gather(*workers)
+
+    return [item for idx, item in enumerate(arr) if results[idx]]
+
+@activity.defn
+async def filter_sessions(sessions: List[Dict]) -> List[Dict]:
+    session_objects = [Session.from_dict(s) for s in sessions]
+
+    filtered_sessions = await async_filter(
+        session_objects,
+        predicate=lambda session: process_session_filter(session), # Passing session object directly
+        concurrency=3
+    )
+    return [s.to_dict() for s in filtered_sessions]
+
+async def process_session_filter(session: Session) -> bool: # Takes Session object
+    schema = {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+            "result": {
+                "type": "boolean",
+            },
+        },
+        "required": ["result"],
+        "additionalProperties": False,
+    }
+    system_prompt = (
+        "You are an expert at analyzing GTC sessions and making recommendations."
+    )
+    user_prompt = (
+        f"Act as an expert AI/ML conference session evaluator. Analyze the title and abstract of each GTC session below. Select only sessions that meet ALL of these criteria:\n\n"
+        f"Core Focus: Explicitly addresses technical methods for:\n\n"
+        f"- Reducing computational costs (e.g., energy, hardware, cloud expenses)\n"
+        f"- Improving efficiency (e.g., faster training, optimized inference, reduced latency, smaller models)\n"
+        f"- Techniques like quantization, pruning, sparsity, distillation, parallelization, or novel architectures.\n\n"
+        f"Technical Depth:\n\n"
+        f"- Mentions frameworks/libraries (e.g., TensorFlow, PyTorch, CUDA) or tools (e.g., Triton, TensorRT).\n"
+        f"- Describes algorithms, workflows, or measurable results (e.g., '40% fewer FLOPs,' '2x speedup on A100').\n"
+        f"- Avoids vague claims (e.g., 'revolutionary,' 'industry-leading') without technical justification.\n\n"
+        f"Exclusion Rules: Immediately reject sessions that:\n\n"
+        f"- Focus on product demos, company announcements, or partnerships without technical detail.\n"
+        f"- Use excessive marketing language (e.g., 'transform your business,' 'exclusive solution').\n"
+        f"- Lack concrete methodologies (e.g., only high-level use cases, no benchmarks).\n\n"
+        f"Example of a session that would be included:\n"
+        f"Title: 'Dynamic Sparsity for Efficient Transformer Training'\n"
+        f"Abstract: 'We present a PyTorch-based method to dynamically prune attention heads during training, reducing memory usage by 35% on GPT-3-scale models without accuracy loss.'\n"
+        f"→ Rationale: Includes technical methodology ('dynamic pruning'), framework ('PyTorch'), and measurable results ('35% memory reduction').\n\n"
+        f"Example of a session that would be excluded:\n"
+        f"Title: 'Accelerate AI with XYZ Corporation’s Cloud Platform'\n"
+        f"Abstract: 'Discover how our industry-leading platform empowers teams to deploy models faster and cut costs!'\n"
+        f"→ Rationale: Promotional language ('industry-leading,' 'empowers'), no technical details.\n\n"
+        f"Here's the title: ``` {session.title} ```, and here's the abstract: ``` {session.abstract} ```\n"
+    )
+    model = "deepseek-ai/DeepSeek-R1"
+    content, reasoning = await complete_with_schema(
+        CENTML_API_KEY,
+        "https://api.centml.com/openai/v1",
+        schema,
+        system_prompt,
+        user_prompt,
+        model
+    )
+    print("abstract", session.abstract)
+    print("filter reasoning", reasoning)
+    print("filter content", content)
+    obj = json.loads(content)
+    return obj["result"]
+
 async def find_insertion_point(min_sessions: list[Session], new_session: Session) -> int:
     left = 0
     right = len(min_sessions)
@@ -230,4 +326,5 @@ async def process_sessions(input: ProcessSessionsInput) -> List[Dict]:
                 min_sessions.insert(pos, new_session)
                 min_sessions.pop(-1)
     return [s.to_dict() for s in min_sessions]
+
 

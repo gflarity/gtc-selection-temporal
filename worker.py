@@ -1,7 +1,7 @@
 from temporalio.client import Client
 from temporalio.worker import Worker
 from workflows import FetchSessionsWorkflow
-from activities import fetch_sessions, process_sessions, Session
+from activities import fetch_sessions, filter_sessions, process_sessions, Session
 import asyncio
 
 
@@ -14,7 +14,7 @@ async def run_worker():
         client,
         task_queue="fetch-sessions-queue",
         workflows=[FetchSessionsWorkflow], # Workflow class
-        activities=[fetch_sessions, process_sessions], # Activity function
+        activities=[fetch_sessions, process_sessions, filter_sessions], # Activity function
     )
 
     # Start the worker and run indefinitely
