@@ -1,14 +1,25 @@
-from dataclasses import dataclass
-import aiohttp  # aiohttp is needed in the activity file
+from pydantic import BaseModel
+import aiohttp
 from temporalio import activity
-from typing import Optional, List, Dict
+from typing import Optional, List
 from datetime import timedelta
 import openai
 import json
 import os
 import asyncio
 
-CENTML_API_KEY = os.getenv("CENTML_API_KEY")
+CENTML_API_KEY= os.getenv("CENTML_API_KEY")
+
+# Pydantic model for Session
+class Session(BaseModel):
+    sessionID: str
+    title: str
+    abstract: str
+
+# Pydantic model for ProcessSessionsInput
+class ProcessSessionsInput(BaseModel):
+    min_sessions: list[Session]
+    new_sessions: list[Session]
 
 async def complete_with_schema(
     api_key: str,
@@ -57,113 +68,84 @@ async def complete_with_schema(
         raise Exception("Failed to generate a response.")
 
     reasoning = None
-    if hasattr(response.choices[0].message, 'reasoning_content'): # Changed from "reasoning_content" in response.choices[0].message
+    if hasattr(response.choices[0].message, 'reasoning_content'):
         reasoning = response.choices[0].message.reasoning_content
 
     return content, reasoning
 
-class Session:
-    def __init__(self, sessionID: str, title: str, abstract: str):
-        self.sessionID = sessionID
-        self.title = title
-        self.abstract = abstract
+# Cache for comparison results
+cache = {}
+async def compare_sessions(a: Session, b: Session) -> int:
+    # Generate cache keys
+    key_ab = f"{a.sessionID}_{b.sessionID}"
+    key_ba = f"{b.sessionID}_{a.sessionID}"
 
-    def to_dict(self):
-        return {"sessionID": self.sessionID, "title": self.title, "abstract": self.abstract}
+    # Check cache
+    if key_ab in cache:
+        print(f"Cache hit for {a.title} vs. {b.title}")
+        return cache[key_ab]
+    elif key_ba in cache:
+        print(f"Cache hit for {b.title} vs. {a.title}")
+        return -cache[key_ba]
 
-    @classmethod
-    def from_dict(cls, d):
-        return cls(d["sessionID"], d["title"], d["abstract"])
+    # Define schema for comparison result
+    schema = {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {"result": {"type": "integer", "enum": [1, -1]}},
+        "required": ["result"],
+        "additionalProperties": False,
+    }
 
-# Initialize a cache to store comparison results
-cache = {} # Changed from Map to dict
-async def compare_sessions(a: Session, b: Session) -> int: # Changed anonymous function to named function
-    # Generate keys for both comparison orders
-    key_ab = f"{a.sessionID}_{b.sessionID}" # Changed from template literals to f-strings
-    key_ba = f"{b.sessionID}_{a.sessionID}" # Changed from template literals to f-strings
+    system_prompt = "You are an expert at comparing GTC conference sessions given their titles and abstracts."
+    model = "deepseek-ai/DeepSeek-R1"
+    user_prompt = (
+        f"You will analyze Titles & Abstracts of two GTC sessions (A and B) to determine which better emphasizes cost reduction, efficiency improvements, and aligns with the following success criteria:\n\n"
+        f"Greater Impact/Optimization Focus: More actionable strategies addressing measurable cost reduction and time/resource efficiency in AI/ML workflows, deployments, or applications. Prioritizes metrics/evidence of concrete benefits over superficial buzz.\n"
+        f"Less Self-Promotion: Avoids hyperbole/pricing-focused selling; highlights challenges/successes usable across models/tools/organizations.\n"
+        f"Broader Applicability: Solutions/insights apply broadly (multiple domains or framework-agnostic) vs. niche/hardware-specific optimizations or verticals.\n"
+        f"⤷ For authenticity: Penalize vague/generic phrases; reward specific frameworks, real-world examples, and caveats acknowledging limits.\n\n"
+        f"Template for Analysis\n"
+        f"Step-by-Step Instructions:\n\n"
+        f"Analyze Criteria for Section A - Assign scores ((1-5): Cost/Efficiency Emphasis | Avoidance of Self-Promotion | Accessibility Generality | Supported Claims.\n\n"
+        f"Analyze Criteria for Section B - Same framework.\n"
+        f"(Compare relative strengths for each criteria).\n\n"
+        f"Make Final Call. Consider:\n\n"
+        f"• It must be related to AI/ML systems engineering, no using AI/ML to solve some problem.\n"
+        f"• Does A/B discuss actual financial metrics (e.g., 20%↑ inference speed) rather than ROI hype?\n"
+        f"• Did one omit practical implementation roadblocks? (= possible overselling sign).\n"
+        f"• If A focuses on custom ASIC chip design & B improves PyTorch pipeline design → B has wider ML impact.\n\n"
+        f"VERDICT Format → {{-1 if A>B, 1 if B>=A}}: {{Return only \"-1\" or \"1\" without explanation.}}\n\n"
+        f"Sessions Provided: "
+        f"Title for paper a: ```{a.title}``` "
+        f"Abstract for paper a: ```{a.abstract}``` "
+        f"Title for paper b: ```{b.title}``` "
+        f"Abstract for paper b: ```{b.abstract}```"
+    )
 
-    # Check if the result is cached for a vs. b
-    if key_ab in cache: # Changed from cache.has(keyAB) to key_ab in cache
-        print(f"Cache hit for {a.title} vs. {b.title}") # Changed from console.log to print
-        return cache[key_ab] # Changed from cache.get(keyAB)! to cache[key_ab]
-    # Check if the result is cached for b vs. a and negate it
-    elif key_ba in cache: # Changed from cache.has(keyBA) to key_ba in cache
-        print(f"Cache hit for {b.title} vs. {a.title}") # Changed from console.log to print
-        return -cache[key_ba] # Changed from cache.get(keyBA)! to cache[key_ba]
-    # If not cached, perform the comparison
-    else:
-        schema = {
-            "$schema": "http://json-schema.org/draft-07/schema#",
-            "type": "object",
-            "properties": {
-                "result": {
-                    "type": "integer",
-                    "enum": [1, -1],
-                },
-            },
-            "required": ["result"],
-            "additionalProperties": False,
-        }
+    print(f"Comparing {a.title} with {b.title}")
+    content, reasoning = await complete_with_schema(
+        CENTML_API_KEY,
+        "https://api.centml.com/openai/v1",
+        schema,
+        system_prompt,
+        user_prompt,
+        model
+    )
 
-        system_prompt = (
-            "You are an expert at comparing GTC conference sessions given their titles and abstracts."
-        )
-        model = "deepseek-ai/DeepSeek-R1"
-        user_prompt = (
-            f"You will analyze Titles & Abstracts of two GTC sessions (A and B) to determine which better emphasizes cost reduction, efficiency improvements, and aligns with the following success criteria:\n\n"
-            f"Greater Impact/Optimization Focus: More actionable strategies addressing measurable cost reduction and time/resource efficiency in AI/ML workflows, deployments, or applications. Prioritizes metrics/evidence of concrete benefits over superficial buzz.\n"
-            f"Less Self-Promotion: Avoids hyperbole/pricing-focused selling; highlights challenges/successes usable across models/tools/organizations.\n"
-            f"Broader Applicability: Solutions/insights apply broadly (multiple domains or framework-agnostic) vs. niche/hardware-specific optimizations or verticals.\n"
-            f"⤷ For authenticity: Penalize vague/generic phrases; reward specific frameworks, real-world examples, and caveats acknowledging limits.\n\n"
-            f"Template for Analysis\n"
-            f"Step-by-Step Instructions:\n\n"
-            f"Analyze Criteria for Section A - Assign scores ((1-5): Cost/Efficiency Emphasis | Avoidance of Self-Promotion | Accessibility Generality | Supported Claims.\n\n"
-            f"Analyze Criteria for Section B - Same framework.\n"
-            f"(Compare relative strengths for each criteria).\n\n"
-            f"Make Final Call. Consider:\n\n"
-            f"• It must be related to AI/ML systems engineering, no using AI/ML to solve some problem.\n"
-            f"• Does A/B discuss actual financial metrics (e.g., 20%↑ inference speed) rather than ROI hype?\n"
-            f"• Did one omit practical implementation roadblocks? (= possible overselling sign).\n"
-            f"• If A focuses on custom ASIC chip design & B improves PyTorch pipeline design → B has wider ML impact.\n\n"
-            f"VERDICT Format → {{-1 if A>B, 1 if B>=A}}: {{Return only \"-1\" or \"1\" without explanation.}}\n\n"
-            f"Sessions Provided: " +
-            "Title for paper a: ```" +
-            a.title +
-            "``` " +
-            "Abstract for paper a: ```" +
-            a.abstract +
-            "``` " +
-            "Title for paper b: ```" +
-            b.title +
-            "``` " +
-            "Abstract for paper b: ```" +
-            b.abstract +
-            "```"
-        )
+    print("reasoning", reasoning)
+    print("content", content)
+    obj = json.loads(content)
+    result = obj["result"]
+    cache[key_ab] = result
+    return result
 
-        print(f"Comparing {a.title} with {b.title}") # Changed from console.log to print
-        content, reasoning = await complete_with_schema(
-            CENTML_API_KEY, # Replace with actual API key or get from environment variables
-            "https://api.centml.com/openai/v1",
-            schema,
-            system_prompt,
-            user_prompt,
-            model
-        )
-
-        print("reasoning", reasoning) # Changed from console.log to print
-        print("content", content) # Changed from console.log to print
-        obj = json.loads(content)
-        result = obj["result"]
-
-        # Cache the result for a vs. b
-        cache[key_ab] = result # Changed from cache.set(keyAB, result) to cache[key_ab] = result
-        return result
-
+class FetchSessionsInput(BaseModel):
+    from_offset: Optional[int]
 
 @activity.defn
-async def fetch_sessions(from_offset: Optional[int]) -> List[Dict]:
-    # aiohttp and request logic belongs HERE, in the ACTIVITY
+async def fetch_sessions(fetch_sessions_input: FetchSessionsInput) -> List[Session]:
+    from_offset = fetch_sessions_input.from_offset
     url = 'https://events.rainfocus.com/api/search'
     headers = {
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -185,21 +167,20 @@ async def fetch_sessions(from_offset: Optional[int]) -> List[Dict]:
         async with session.post(url, headers=headers, data=params) as response:
             response.raise_for_status()
             obj = await response.json()
-        
-    new_sessions: list = []    
+
+    new_sessions: list[Session] = []
     if from_offset is None:
         for d in obj["sectionList"][0]["items"]:
-
-            new_sessions.append(Session.from_dict(d).to_dict())
+            new_sessions.append(Session(**d))
     else:
         for d in obj["items"]:
-            new_sessions.append(Session.from_dict(d).to_dict())
+            new_sessions.append(Session(**d))
 
     return new_sessions
 
 async def async_filter(arr: list, predicate, concurrency: int = 1) -> list:
     index = 0
-    results: list[bool] = [False] * len(arr) # Initialize results with False
+    results: list[bool] = [False] * len(arr)
 
     async def worker():
         nonlocal index
@@ -210,12 +191,12 @@ async def async_filter(arr: list, predicate, concurrency: int = 1) -> list:
             while attempts < 2:
                 try:
                     results[current_index] = await predicate(arr[current_index])
-                    break # Break out of retry loop on success
+                    break
                 except Exception as error:
                     print(error)
                     print("Retrying item", current_index)
                     attempts += 1
-            if attempts == 2: # Last attempt without retry loop
+            if attempts == 2:
                 try:
                     results[current_index] = await predicate(arr[current_index])
                 except Exception as error:
@@ -227,32 +208,30 @@ async def async_filter(arr: list, predicate, concurrency: int = 1) -> list:
 
     return [item for idx, item in enumerate(arr) if results[idx]]
 
+class FilterSessionsInput(BaseModel):
+    sessions: List[Session]
+
+
 @activity.defn
-async def filter_sessions(sessions: List[Dict]) -> List[Dict]:
-    session_objects = [Session.from_dict(s) for s in sessions]
+async def filter_sessions(filter_sessions_input: FilterSessionsInput) -> List[Session]:
+    
 
     filtered_sessions = await async_filter(
-        session_objects,
-        predicate=lambda session: process_session_filter(session), # Passing session object directly
+        filter_sessions_input.sessions,
+        predicate=process_session_filter,
         concurrency=3
     )
-    return [s.to_dict() for s in filtered_sessions]
+    return filtered_sessions
 
-async def process_session_filter(session: Session) -> bool: # Takes Session object
+async def process_session_filter(session: Session) -> bool:
     schema = {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
-        "properties": {
-            "result": {
-                "type": "boolean",
-            },
-        },
+        "properties": {"result": {"type": "boolean"}},
         "required": ["result"],
         "additionalProperties": False,
     }
-    system_prompt = (
-        "You are an expert at evaluating AI/ML conference sessions, specifically focusing on identifying sessions that discuss optimizations of AI/ML systems themselves."
-    )
+    system_prompt = "You are an expert at evaluating AI/ML conference sessions, specifically focusing on identifying sessions that discuss optimizations of AI/ML systems themselves."
     user_prompt = (
         f"Analyze the following GTC session title and abstract. Determine if it meets MANY of the following criteria for inclusion:\n\n"
         f"**Core Focus**: The session must explicitly address technical methods for optimizing the computational efficiency of AI/ML systems themselves. This includes:\n"
@@ -313,28 +292,19 @@ async def find_insertion_point(min_sessions: list[Session], new_session: Session
             left = mid + 1
     return left
 
-@dataclass
-class ProcessSessionsInput:
-    min_sessions: list[dict]
-    new_sessions: list[dict]
-
 @activity.defn
-async def process_sessions(input: ProcessSessionsInput) -> List[Dict]:
-    min_sessions = [Session.from_dict(d) for d in input.min_sessions]
-    new_sessions = [Session.from_dict(d) for d in input.new_sessions]
-    for new_session in new_sessions:    
+async def process_sessions(input: ProcessSessionsInput) -> List[Session]:
+    min_sessions = input.min_sessions
+    new_sessions = input.new_sessions
+    for new_session in new_sessions:
         if len(min_sessions) == 0:
             min_sessions.append(new_session)
         elif len(min_sessions) < 10:
-            # Insert at the correct position to maintain sort
             pos = await find_insertion_point(min_sessions, new_session)
             min_sessions.insert(pos, new_session)
         else:
-            # Only add if smaller than the largest
             if await compare_sessions(new_session, min_sessions[-1]) == 1:
                 pos = await find_insertion_point(min_sessions, new_session)
                 min_sessions.insert(pos, new_session)
                 min_sessions.pop(-1)
-    return [s.to_dict() for s in min_sessions]
-
-
+    return min_sessions

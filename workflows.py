@@ -2,7 +2,7 @@ from temporalio import workflow
 from datetime import timedelta
 
 with workflow.unsafe.imports_passed_through(): # Mark activities import as pass-through
-    from activities import fetch_sessions, filter_sessions, process_sessions, Session, ProcessSessionsInput
+    from activities import fetch_sessions, FetchSessionsInput, filter_sessions, FilterSessionsInput, process_sessions, ProcessSessionsInput, Session, ProcessSessionsInput
 
 @workflow.defn
 class FetchSessionsWorkflow:
@@ -17,7 +17,7 @@ class FetchSessionsWorkflow:
             # Workflow ONLY calls the activity            
             new_sessions = await workflow.execute_activity(
                 fetch_sessions, # Call the activity
-                offset,
+                FetchSessionsInput(from_offset=offset), # Pass the input
                 start_to_close_timeout=timedelta(seconds=30),
             )
             if not new_sessions:
@@ -34,7 +34,7 @@ class FetchSessionsWorkflow:
             # save some time by filtering out sessions that are not relevant
             filtered_sessions = await workflow.execute_activity(
                 filter_sessions,
-                new_sessions,
+                FilterSessionsInput(sessions=new_sessions),
                 start_to_close_timeout=timedelta(seconds=300),
             )
 
@@ -43,7 +43,7 @@ class FetchSessionsWorkflow:
             # Process the new sessions            
             min_sessions = await workflow.execute_activity(
                 process_sessions,
-                ProcessSessionsInput(min_sessions, filtered_sessions),
+                ProcessSessionsInput(min_sessions=min_sessions, new_sessions=filtered_sessions),
                 start_to_close_timeout=timedelta(seconds=600),
             )
 
