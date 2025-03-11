@@ -5,10 +5,9 @@ from typing import Optional, List
 from datetime import timedelta
 import openai
 import json
-import os
 import asyncio
+import string
 
-CENTML_API_KEY= os.getenv("CENTML_API_KEY")
 
 # Pydantic model for Session
 class Session(BaseModel):
@@ -20,6 +19,8 @@ class Session(BaseModel):
 class ProcessSessionsInput(BaseModel):
     min_sessions: list[Session]
     new_sessions: list[Session]
+    api_key: str
+
 
 async def complete_with_schema(
     api_key: str,
@@ -75,7 +76,7 @@ async def complete_with_schema(
 
 # Cache for comparison results
 cache = {}
-async def compare_sessions(a: Session, b: Session) -> int:
+async def compare_sessions(api_key: str, a: Session, b: Session) -> int:
     # Generate cache keys
     key_ab = f"{a.sessionID}_{b.sessionID}"
     key_ba = f"{b.sessionID}_{a.sessionID}"
@@ -100,20 +101,19 @@ async def compare_sessions(a: Session, b: Session) -> int:
     system_prompt = "You are an expert at comparing GTC conference sessions given their titles and abstracts."
     model = "deepseek-ai/DeepSeek-R1"
     user_prompt = (
-        f"You will analyze Titles & Abstracts of two GTC sessions (A and B) to determine which better emphasizes cost reduction, efficiency improvements, and aligns with the following success criteria:\n\n"
-        f"Greater Impact/Optimization Focus: More actionable strategies addressing measurable cost reduction and time/resource efficiency in AI/ML workflows, deployments, or applications. Prioritizes metrics/evidence of concrete benefits over superficial buzz.\n"
-        f"Less Self-Promotion: Avoids hyperbole/pricing-focused selling; highlights challenges/successes usable across models/tools/organizations.\n"
-        f"Broader Applicability: Solutions/insights apply broadly (multiple domains or framework-agnostic) vs. niche/hardware-specific optimizations or verticals.\n"
-        f"⤷ For authenticity: Penalize vague/generic phrases; reward specific frameworks, real-world examples, and caveats acknowledging limits.\n\n"
+        f"You will analyze Titles & Abstracts of two GTC sessions (A and B) to determine which better emphasizes an academic discussions of techniques that lead to cost reduction and/or improved time/resource efficiency in AI/ML workflows, deployments, or applications."
+        f"Prioritize abstacts that include evidence of concrete benefits over superficial buzz.\n"
+        f"Avoid sessions that involve hyperbole/pricing-focused selling\n"
+        f"Include sessions that seem to apply broadly (multiple domains or framework-agnostic) rather than niche/hardware-specific optimizations or verticals.\n"
+        f"Penalize vague/generic phrases; reward specific frameworks, real-world examples, and caveats acknowledging limits.\n\n"
         f"Template for Analysis\n"
         f"Step-by-Step Instructions:\n\n"
         f"Analyze Criteria for Section A - Assign scores ((1-5): Cost/Efficiency Emphasis | Avoidance of Self-Promotion | Accessibility Generality | Supported Claims.\n\n"
         f"Analyze Criteria for Section B - Same framework.\n"
         f"(Compare relative strengths for each criteria).\n\n"
         f"Make Final Call. Consider:\n\n"
-        f"• It must be related to AI/ML systems engineering, no using AI/ML to solve some problem.\n"
+        f"• It must be related to AI/ML systems engineering, no using AI/ML to solve some problems such as autonomous driving, or cancer etc.\n"
         f"• Does A/B discuss actual financial metrics (e.g., 20%↑ inference speed) rather than ROI hype?\n"
-        f"• Did one omit practical implementation roadblocks? (= possible overselling sign).\n"
         f"• If A focuses on custom ASIC chip design & B improves PyTorch pipeline design → B has wider ML impact.\n\n"
         f"VERDICT Format → {{-1 if A>B, 1 if B>=A}}: {{Return only \"-1\" or \"1\" without explanation.}}\n\n"
         f"Sessions Provided: "
@@ -125,7 +125,7 @@ async def compare_sessions(a: Session, b: Session) -> int:
 
     print(f"Comparing {a.title} with {b.title}")
     content, reasoning = await complete_with_schema(
-        CENTML_API_KEY,
+        api_key,
         "https://api.centml.com/openai/v1",
         schema,
         system_prompt,
@@ -210,7 +210,7 @@ async def async_filter(arr: list, predicate, concurrency: int = 1) -> list:
 
 class FilterSessionsInput(BaseModel):
     sessions: List[Session]
-
+    api_key: str
 
 @activity.defn
 async def filter_sessions(filter_sessions_input: FilterSessionsInput) -> List[Session]:
@@ -218,12 +218,12 @@ async def filter_sessions(filter_sessions_input: FilterSessionsInput) -> List[Se
 
     filtered_sessions = await async_filter(
         filter_sessions_input.sessions,
-        predicate=process_session_filter,
+        predicate=lambda session: process_session_filter(filter_sessions_input.api_key, session),
         concurrency=3
     )
     return filtered_sessions
 
-async def process_session_filter(session: Session) -> bool:
+async def process_session_filter(api_key: str, session: Session) -> bool:
     schema = {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
@@ -244,8 +244,9 @@ async def process_session_filter(session: Session) -> bool:
         f"- Describe algorithms, workflows, or provide measurable results (e.g., '40% fewer FLOPs,' '2x speedup on A100') related to AI/ML system optimization.\n"
         f"- Avoid vague claims (e.g., 'revolutionary,' 'industry-leading') without technical justification.\n\n"
         f"**Exclusion Rules**: Reject sessions that:\n"
-        f"- Focus on applying AI/ML to optimize other domains or processes, rather than optimizing the AI/ML systems themselves.\n"
-        f"- Are product demos, company announcements, or partnerships without technical detail on AI/ML optimization.\n"
+        f"- Avoid workshop sessions, ie those that include 'Learn how to'"    
+        f"- Avoid session that Focus on applying AI/ML to optimize other domains or processes, rather than optimizing the AI/ML systems themselves.\n"
+        f"- Avoid sessions that are product demos, company announcements, or partnerships without technical detail on AI/ML optimization.\n"
         f"- Use excessive marketing language (e.g., 'transform your business,' 'exclusive solution').\n"
         f"- Lack concrete methodologies for AI/ML optimization (e.g., only high-level use cases, no benchmarks).\n\n"
         f"**Examples**:\n"
@@ -268,7 +269,7 @@ async def process_session_filter(session: Session) -> bool:
     )
     model = "deepseek-ai/DeepSeek-R1"
     content, reasoning = await complete_with_schema(
-        CENTML_API_KEY,
+        api_key,
         "https://api.centml.com/openai/v1",
         schema,
         system_prompt,
@@ -281,12 +282,12 @@ async def process_session_filter(session: Session) -> bool:
     obj = json.loads(content)
     return obj["result"]
 
-async def find_insertion_point(min_sessions: list[Session], new_session: Session) -> int:
+async def find_insertion_point(api_key: str, min_sessions: list[Session], new_session: Session) -> int:
     left = 0
     right = len(min_sessions)
     while left < right:
         mid = (left + right) // 2
-        if await compare_sessions(new_session, min_sessions[mid]) == 1:
+        if await compare_sessions(api_key, new_session, min_sessions[mid]) == -1:
             right = mid
         else:
             left = mid + 1
@@ -296,15 +297,35 @@ async def find_insertion_point(min_sessions: list[Session], new_session: Session
 async def process_sessions(input: ProcessSessionsInput) -> List[Session]:
     min_sessions = input.min_sessions
     new_sessions = input.new_sessions
+    api_key = input.api_key # Extract api_key from input
     for new_session in new_sessions:
         if len(min_sessions) == 0:
             min_sessions.append(new_session)
         elif len(min_sessions) < 10:
-            pos = await find_insertion_point(min_sessions, new_session)
+            pos = await find_insertion_point(api_key, min_sessions, new_session)
             min_sessions.insert(pos, new_session)
         else:
-            if await compare_sessions(new_session, min_sessions[-1]) == 1:
-                pos = await find_insertion_point(min_sessions, new_session)
+            if await compare_sessions(api_key, new_sessions[-1], min_sessions[-1]) == 1: # Corrected: compare new_session with min_sessions[-1]
+                pos = await find_insertion_point(api_key, min_sessions, new_session)
                 min_sessions.insert(pos, new_session)
                 min_sessions.pop(-1)
     return min_sessions
+
+def contains_non_standard_characters(text):
+    standard_chars = string.ascii_letters + string.digits + string.punctuation + " "
+    for char in text:
+        if char not in standard_chars:
+            return True
+    return False
+
+
+class FilterNonEnglishSessionsInput(BaseModel):
+    sessions: List[Session]
+
+@activity.defn
+async def filter_non_english_sessions(filter_non_english_sessions_input: FilterNonEnglishSessionsInput) -> List[Session]:
+    filtered_sessions = []
+    for session in filter_non_english_sessions_input.sessions:
+        if not contains_non_standard_characters(session.title) and not contains_non_standard_characters(session.abstract):
+            filtered_sessions.append(session)
+    return filtered_sessions

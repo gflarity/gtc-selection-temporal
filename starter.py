@@ -1,12 +1,13 @@
 import asyncio
 from temporalio.client import Client
+from temporalio.contrib.pydantic import pydantic_data_converter
 
 # Import the workflow from your worker.py file (assuming it's in the same directory)
 from worker import FetchSessionsWorkflow
 
 async def main():
     # Connect to the Temporal server
-    client = await Client.connect("localhost:7233")
+    client = await Client.connect("localhost:7233", data_converter=pydantic_data_converter)
 
     # Run the workflow and get the result
     try:

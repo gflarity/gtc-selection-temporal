@@ -1,8 +1,14 @@
 from temporalio import workflow
 from datetime import timedelta
+import os
 
 with workflow.unsafe.imports_passed_through(): # Mark activities import as pass-through
-    from activities import fetch_sessions, FetchSessionsInput, filter_sessions, FilterSessionsInput, process_sessions, ProcessSessionsInput, Session, ProcessSessionsInput
+    from activities import fetch_sessions, FetchSessionsInput, Session
+    from activities import filter_sessions, FilterSessionsInput
+    from activities import process_sessions, ProcessSessionsInput, ProcessSessionsInput
+    from activities import filter_non_english_sessions, FilterNonEnglishSessionsInput
+
+CENTML_API_KEY= os.getenv("CENTML_API_KEY")
 
 @workflow.defn
 class FetchSessionsWorkflow:
@@ -31,10 +37,17 @@ class FetchSessionsWorkflow:
 
             print('offset in workflow', offset)
 
+            # filter out non english sessions
+            english_sessions = await workflow.execute_activity(
+                filter_non_english_sessions,
+                FilterNonEnglishSessionsInput(sessions=new_sessions),
+                start_to_close_timeout=timedelta(seconds=5),
+            )
+
             # save some time by filtering out sessions that are not relevant
             filtered_sessions = await workflow.execute_activity(
                 filter_sessions,
-                FilterSessionsInput(sessions=new_sessions),
+                FilterSessionsInput(sessions=english_sessions, api_key=CENTML_API_KEY),
                 start_to_close_timeout=timedelta(seconds=300),
             )
 
@@ -43,7 +56,7 @@ class FetchSessionsWorkflow:
             # Process the new sessions            
             min_sessions = await workflow.execute_activity(
                 process_sessions,
-                ProcessSessionsInput(min_sessions=min_sessions, new_sessions=filtered_sessions),
+                ProcessSessionsInput(min_sessions=min_sessions, new_sessions=filtered_sessions, api_key=CENTML_API_KEY),
                 start_to_close_timeout=timedelta(seconds=600),
             )
 
