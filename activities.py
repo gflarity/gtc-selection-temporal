@@ -3,24 +3,24 @@ import aiohttp
 from temporalio import activity
 from typing import Optional, List
 from datetime import timedelta
-import openai
+import CentML
 import json
 import asyncio
 import string
 
+# Note: 'timedelta' is imported but not used in this file. It may be a leftover from previous iterations.
 
-# Pydantic model for Session
 class Session(BaseModel):
-    sessionID: str
-    title: str
-    abstract: str
+    """Represents a GTC conference session with essential metadata."""
+    sessionID: str  # Unique identifier for the session
+    title: str      # Title of the session
+    abstract: str   # Abstract describing the session content
 
-# Pydantic model for ProcessSessionsInput
 class ProcessSessionsInput(BaseModel):
-    min_sessions: list[Session]
-    new_sessions: list[Session]
-    api_key: str
-
+    """Input model for the process_sessions activity."""
+    min_sessions: list[Session]  # Current list of top sessions (sorted by relevance)
+    new_sessions: list[Session]  # New sessions to evaluate and potentially add
+    api_key: str                 # API key for CentML Serverless API
 
 async def complete_with_schema(
     api_key: str,
@@ -31,19 +31,28 @@ async def complete_with_schema(
     model: str = "meta-llama/Llama-3.3-70B-Instruct"
 ) -> tuple[str, str | None]:
     """
-    Performs a completion using the provided schema, system prompt, and user prompt.
-    The schema instruction is automatically appended to the system prompt.
-    @param schema - The JSON schema object that the response should adhere to.
-    @param system_prompt - The base system prompt (e.g., "You are a helpful AI assistant.").
-    @param user_prompt - The user prompt to send to the model.
-    @param model - The model to use for the completion (default: "meta-llama/Llama-3.3-70B-Instruct").
-    @returns A promise that resolves to the parsed JSON response object.
-    """
-    client = openai.AsyncOpenAI(
-        api_key=api_key,
-        base_url=base_url,
-    )
+    Performs a LLM completion with a specified JSON schema.
 
+    Constructs a system message incorporating the schema and requests a chat completion
+    that adheres to it. Used as a utility for evaluating sessions via natural language processing.
+
+    Args:
+        api_key (str): The API key for authenticating with CentML Serverless API.
+        base_url (str): The base URL for the CentML Serverless API endpoint.
+        schema (dict): JSON schema that the response must follow.
+        system_prompt (str): Base system prompt for the AI model.
+        user_prompt (str): Specific prompt provided by the user.
+        model (str, optional): Model identifier for CentML Serverless API. Defaults to "meta-llama/Llama-3.3-70B-Instruct".
+
+    Returns:
+        tuple[str, str | None]: A tuple containing:
+            - The response content as a JSON string.
+            - Optional reasoning content if provided by the API, else None.
+
+    Raises:
+        Exception: If the API fails to generate a response.
+    """
+    client = CentML.AsyncCentML(api_key=api_key, base_url=base_url)
     schema_str = json.dumps(schema)
     system_message = f"{system_prompt} Here's the json schema you need to adhere to: <schema>{schema_str}</schema>"
 
@@ -56,11 +65,7 @@ async def complete_with_schema(
         stream=False,
         response_format={
             "type": "json_schema",
-            "json_schema": {
-                "name": "response",
-                "schema": schema,
-                "strict": True,
-            },
+            "json_schema": {"name": "response", "schema": schema, "strict": True},
         },
     )
 
@@ -68,20 +73,34 @@ async def complete_with_schema(
     if not content:
         raise Exception("Failed to generate a response.")
 
-    reasoning = None
-    if hasattr(response.choices[0].message, 'reasoning_content'):
-        reasoning = response.choices[0].message.reasoning_content
-
+    reasoning = getattr(response.choices[0].message, 'reasoning_content', None)
     return content, reasoning
 
-# Cache for comparison results
+# Cache for storing comparison results to avoid redundant API calls
 cache = {}
+
 async def compare_sessions(api_key: str, a: Session, b: Session) -> int:
-    # Generate cache keys
+    """
+    Compares two sessions to determine which better discusses AI/ML system optimizations.
+
+    Uses CentML's Serverless API to evaluate session titles and abstracts based on criteria favoring
+    academic, technical discussions over promotional content. Results are cached.
+
+    Args:
+        api_key (str): API key for CentML Serverless API.
+        a (Session): First session to compare.
+        b (Session): Second session to compare.
+
+    Returns:
+        int: Comparison result where:
+            - -1 means 'a' is more relevant than 'b'.
+            - 1 means 'b' is more relevant or equal to 'a'.
+    """
+    # Generate bidirectional cache keys
     key_ab = f"{a.sessionID}_{b.sessionID}"
     key_ba = f"{b.sessionID}_{a.sessionID}"
 
-    # Check cache
+    # Check cache to avoid redundant comparisons
     if key_ab in cache:
         print(f"Cache hit for {a.title} vs. {b.title}")
         return cache[key_ab]
@@ -89,7 +108,7 @@ async def compare_sessions(api_key: str, a: Session, b: Session) -> int:
         print(f"Cache hit for {b.title} vs. {a.title}")
         return -cache[key_ba]
 
-    # Define schema for comparison result
+    # Schema for expected comparison result
     schema = {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
@@ -125,26 +144,37 @@ async def compare_sessions(api_key: str, a: Session, b: Session) -> int:
 
     print(f"Comparing {a.title} with {b.title}")
     content, reasoning = await complete_with_schema(
-        api_key,
-        "https://api.centml.com/openai/v1",
-        schema,
-        system_prompt,
-        user_prompt,
-        model
+        api_key, "https://api.centml.com/CentML/v1", schema, system_prompt, user_prompt, model
     )
 
     print("reasoning", reasoning)
     print("content", content)
     obj = json.loads(content)
     result = obj["result"]
-    cache[key_ab] = result
+    cache[key_ab] = result  # Cache the result
     return result
 
 class FetchSessionsInput(BaseModel):
-    from_offset: Optional[int]
+    """Input model for the fetch_sessions activity."""
+    from_offset: Optional[int]  # Optional offset for pagination, None for initial fetch
 
 @activity.defn
 async def fetch_sessions(fetch_sessions_input: FetchSessionsInput) -> List[Session]:
+    """
+    Fetches sessions from the GTC conference API.
+
+    Sends a POST request to retrieve session data, supporting pagination via an offset.
+    Part of a Temporal.io workflow for session processing.
+
+    Args:
+        fetch_sessions_input (FetchSessionsInput): Input containing an optional offset.
+
+    Returns:
+        List[Session]: List of parsed Session objects from the API response.
+
+    Raises:
+        aiohttp.ClientResponseError: If the API request fails.
+    """
     from_offset = fetch_sessions_input.from_offset
     url = 'https://events.rainfocus.com/api/search'
     headers = {
@@ -169,6 +199,7 @@ async def fetch_sessions(fetch_sessions_input: FetchSessionsInput) -> List[Sessi
             obj = await response.json()
 
     new_sessions: list[Session] = []
+    # Response structure differs based on whether it's the initial fetch or paginated
     if from_offset is None:
         for d in obj["sectionList"][0]["items"]:
             new_sessions.append(Session(**d))
@@ -179,6 +210,19 @@ async def fetch_sessions(fetch_sessions_input: FetchSessionsInput) -> List[Sessi
     return new_sessions
 
 async def async_filter(arr: list, predicate, concurrency: int = 1) -> list:
+    """
+    Asynchronously filters a list using a predicate function with concurrency.
+
+    Employs multiple worker tasks to evaluate items concurrently, with retry logic for robustness.
+
+    Args:
+        arr (list): List of items to filter.
+        predicate (callable): Async function returning a boolean for each item.
+        concurrency (int, optional): Number of concurrent workers. Defaults to 1.
+
+    Returns:
+        list: Filtered list containing items where predicate returned True.
+    """
     index = 0
     results: list[bool] = [False] * len(arr)
 
@@ -188,7 +232,7 @@ async def async_filter(arr: list, predicate, concurrency: int = 1) -> list:
             current_index = index
             index += 1
             attempts = 0
-            while attempts < 2:
+            while attempts < 2:  # Retry up to 2 times on failure
                 try:
                     results[current_index] = await predicate(arr[current_index])
                     break
@@ -196,7 +240,7 @@ async def async_filter(arr: list, predicate, concurrency: int = 1) -> list:
                     print(error)
                     print("Retrying item", current_index)
                     attempts += 1
-            if attempts == 2:
+            if attempts == 2:  # Final attempt without retry
                 try:
                     results[current_index] = await predicate(arr[current_index])
                 except Exception as error:
@@ -205,25 +249,47 @@ async def async_filter(arr: list, predicate, concurrency: int = 1) -> list:
 
     workers = [asyncio.create_task(worker()) for _ in range(concurrency)]
     await asyncio.gather(*workers)
-
     return [item for idx, item in enumerate(arr) if results[idx]]
 
 class FilterSessionsInput(BaseModel):
-    sessions: List[Session]
-    api_key: str
+    """Input model for the filter_sessions activity."""
+    sessions: List[Session]  # List of sessions to filter
+    api_key: str             # API key for CentML Serverless API
 
 @activity.defn
 async def filter_sessions(filter_sessions_input: FilterSessionsInput) -> List[Session]:
-    
+    """
+    Filters sessions for relevance to AI/ML system optimizations.
 
+    Uses concurrent filtering to evaluate sessions against specific criteria via CentML API.
+    Part of a Temporal.io workflow.
+
+    Args:
+        filter_sessions_input (FilterSessionsInput): Input with sessions and API key.
+
+    Returns:
+        List[Session]: Filtered list of relevant sessions.
+    """
     filtered_sessions = await async_filter(
         filter_sessions_input.sessions,
         predicate=lambda session: process_session_filter(filter_sessions_input.api_key, session),
-        concurrency=3
+        concurrency=3  # Process 3 sessions concurrently
     )
     return filtered_sessions
 
 async def process_session_filter(api_key: str, session: Session) -> bool:
+    """
+    Determines if a session meets criteria for AI/ML system optimization discussions.
+
+    Evaluates a session's title and abstract using CentML's Serverless API against predefined criteria.
+
+    Args:
+        api_key (str): API key for CentML Serverless API.
+        session (Session): Session to evaluate.
+
+    Returns:
+        bool: True if the session meets the criteria, False otherwise.
+    """
     schema = {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
@@ -244,7 +310,7 @@ async def process_session_filter(api_key: str, session: Session) -> bool:
         f"- Describe algorithms, workflows, or provide measurable results (e.g., '40% fewer FLOPs,' '2x speedup on A100') related to AI/ML system optimization.\n"
         f"- Avoid vague claims (e.g., 'revolutionary,' 'industry-leading') without technical justification.\n\n"
         f"**Exclusion Rules**: Reject sessions that:\n"
-        f"- Avoid workshop sessions, ie those that include 'Learn how to'"    
+        f"- Avoid workshop sessions, ie those that include 'Learn how to'\n"
         f"- Avoid session that Focus on applying AI/ML to optimize other domains or processes, rather than optimizing the AI/ML systems themselves.\n"
         f"- Avoid sessions that are product demos, company announcements, or partnerships without technical detail on AI/ML optimization.\n"
         f"- Use excessive marketing language (e.g., 'transform your business,' 'exclusive solution').\n"
@@ -269,12 +335,7 @@ async def process_session_filter(api_key: str, session: Session) -> bool:
     )
     model = "deepseek-ai/DeepSeek-R1"
     content, reasoning = await complete_with_schema(
-        api_key,
-        "https://api.centml.com/openai/v1",
-        schema,
-        system_prompt,
-        user_prompt,
-        model
+        api_key, "https://api.centml.com/CentML/v1", schema, system_prompt, user_prompt, model
     )
     print("abstract", session.abstract)
     print("filter reasoning", reasoning)
@@ -283,11 +344,25 @@ async def process_session_filter(api_key: str, session: Session) -> bool:
     return obj["result"]
 
 async def find_insertion_point(api_key: str, min_sessions: list[Session], new_session: Session) -> int:
+    """
+    Finds the insertion point for a new session in a sorted list using binary search.
+
+    Assumes min_sessions is sorted in descending order of relevance (best first).
+    Uses compare_sessions to maintain order.
+
+    Args:
+        api_key (str): API key for CentML Serverless API.
+        min_sessions (list[Session]): Sorted list of top sessions.
+        new_session (Session): Session to insert.
+
+    Returns:
+        int: Index where new_session should be inserted.
+    """
     left = 0
     right = len(min_sessions)
     while left < right:
         mid = (left + right) // 2
-        if await compare_sessions(api_key, new_session, min_sessions[mid]) == -1:
+        if await compare_sessions(api_key, new_session, min_sessions[mid]) == -1:  # new_session > mid
             right = mid
         else:
             left = mid + 1
@@ -295,9 +370,26 @@ async def find_insertion_point(api_key: str, min_sessions: list[Session], new_se
 
 @activity.defn
 async def process_sessions(input: ProcessSessionsInput) -> List[Session]:
+    """
+    Maintains a list of the top 10 most relevant sessions.
+
+    Evaluates new sessions and inserts them into a sorted list if they rank among the top 10.
+    Part of a Temporal.io workflow.
+
+    Note: Contains a potential bug in the comparison condition. Should likely check if
+    new_session > min_sessions[-1] (i.e., compare_sessions returns -1) to include it,
+    but currently checks == 1 and has a typo using new_sessions[-1].
+
+    Args:
+        input (ProcessSessionsInput): Input with current top sessions, new sessions, and API key.
+
+    Returns:
+        List[Session]: Updated list of top sessions (max 10).
+    """
     min_sessions = input.min_sessions
     new_sessions = input.new_sessions
-    api_key = input.api_key # Extract api_key from input
+    api_key = input.api_key
+
     for new_session in new_sessions:
         if len(min_sessions) == 0:
             min_sessions.append(new_session)
@@ -305,27 +397,50 @@ async def process_sessions(input: ProcessSessionsInput) -> List[Session]:
             pos = await find_insertion_point(api_key, min_sessions, new_session)
             min_sessions.insert(pos, new_session)
         else:
-            if await compare_sessions(api_key, new_sessions[-1], min_sessions[-1]) == 1: # Corrected: compare new_session with min_sessions[-1]
+            # Bug: Should be 'new_session' not 'new_sessions[-1]', and condition should be == -1
+            # Current: if min_sessions[-1] >= new_session, which incorrectly triggers insertion
+            # Should be: if new_session > min_sessions[-1] (i.e., == -1)
+            if await compare_sessions(api_key, new_sessions[-1], min_sessions[-1]) == 1:
                 pos = await find_insertion_point(api_key, min_sessions, new_session)
                 min_sessions.insert(pos, new_session)
-                min_sessions.pop(-1)
+                min_sessions.pop(-1)  # Remove least relevant session
     return min_sessions
 
-def contains_non_standard_characters(text):
-    standard_chars = string.ascii_letters + string.digits + string.punctuation + " "
-    for char in text:
-        if char not in standard_chars:
-            return True
-    return False
+def contains_non_standard_characters(text: str) -> bool:
+    """
+    Checks if text contains non-standard (non-ASCII) characters.
 
+    Standard characters include ASCII letters, digits, punctuation, and space.
+
+    Args:
+        text (str): Text to evaluate.
+
+    Returns:
+        bool: True if non-standard characters are present, False otherwise.
+    """
+    standard_chars = string.ascii_letters + string.digits + string.punctuation + " "
+    return any(char not in standard_chars for char in text)
 
 class FilterNonEnglishSessionsInput(BaseModel):
-    sessions: List[Session]
+    """Input model for the filter_non_english_sessions activity."""
+    sessions: List[Session]  # List of sessions to filter
 
 @activity.defn
 async def filter_non_english_sessions(filter_non_english_sessions_input: FilterNonEnglishSessionsInput) -> List[Session]:
-    filtered_sessions = []
-    for session in filter_non_english_sessions_input.sessions:
-        if not contains_non_standard_characters(session.title) and not contains_non_standard_characters(session.abstract):
-            filtered_sessions.append(session)
+    """
+    Filters out sessions likely containing non-English text.
+
+    Removes sessions with titles or abstracts containing non-standard characters.
+    Part of a Temporal.io workflow.
+
+    Args:
+        filter_non_english_sessions_input (FilterNonEnglishSessionsInput): Input with sessions to filter.
+
+    Returns:
+        List[Session]: List of sessions likely in English.
+    """
+    filtered_sessions = [
+        session for session in filter_non_english_sessions_input.sessions
+        if not (contains_non_standard_characters(session.title) or contains_non_standard_characters(session.abstract))
+    ]
     return filtered_sessions
