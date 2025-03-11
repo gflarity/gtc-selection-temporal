@@ -1,7 +1,7 @@
 from temporalio.client import Client
 from temporalio.worker import Worker
 from temporalio.contrib.pydantic import pydantic_data_converter
-from workflows import FetchSessionsWorkflow
+from workflows import TopTenGTCSessionsWorkflow
 from activities import fetch_sessions, filter_sessions, process_sessions, filter_non_english_sessions, Session
 import asyncio
 
@@ -14,7 +14,7 @@ async def run_worker():
     worker = Worker(
         client,
         task_queue="fetch-sessions-queue",
-        workflows=[FetchSessionsWorkflow], # Workflow class
+        workflows=[TopTenGTCSessionsWorkflow], # Workflow class
         activities=[fetch_sessions, process_sessions, filter_sessions, filter_non_english_sessions], # Activity function
     )
 

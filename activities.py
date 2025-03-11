@@ -3,7 +3,7 @@ import aiohttp
 from temporalio import activity
 from typing import Optional, List
 from datetime import timedelta
-import CentML
+import openai
 import json
 import asyncio
 import string
@@ -52,7 +52,7 @@ async def complete_with_schema(
     Raises:
         Exception: If the API fails to generate a response.
     """
-    client = CentML.AsyncCentML(api_key=api_key, base_url=base_url)
+    client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
     schema_str = json.dumps(schema)
     system_message = f"{system_prompt} Here's the json schema you need to adhere to: <schema>{schema_str}</schema>"
 
@@ -144,7 +144,7 @@ async def compare_sessions(api_key: str, a: Session, b: Session) -> int:
 
     print(f"Comparing {a.title} with {b.title}")
     content, reasoning = await complete_with_schema(
-        api_key, "https://api.centml.com/CentML/v1", schema, system_prompt, user_prompt, model
+        api_key, "https://api.centml.com/openai/v1", schema, system_prompt, user_prompt, model
     )
 
     print("reasoning", reasoning)
@@ -335,7 +335,7 @@ async def process_session_filter(api_key: str, session: Session) -> bool:
     )
     model = "deepseek-ai/DeepSeek-R1"
     content, reasoning = await complete_with_schema(
-        api_key, "https://api.centml.com/CentML/v1", schema, system_prompt, user_prompt, model
+        api_key, "https://api.centml.com/openai/v1", schema, system_prompt, user_prompt, model
     )
     print("abstract", session.abstract)
     print("filter reasoning", reasoning)

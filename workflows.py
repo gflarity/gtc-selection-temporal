@@ -1,6 +1,7 @@
 from temporalio import workflow
 from datetime import timedelta
 import os
+from pydantic import BaseModel
 
 with workflow.unsafe.imports_passed_through(): # Mark activities import as pass-through
     from activities import fetch_sessions, FetchSessionsInput, Session
@@ -8,12 +9,16 @@ with workflow.unsafe.imports_passed_through(): # Mark activities import as pass-
     from activities import process_sessions, ProcessSessionsInput, ProcessSessionsInput
     from activities import filter_non_english_sessions, FilterNonEnglishSessionsInput
 
-CENTML_API_KEY= os.getenv("CENTML_API_KEY")
+
+class TopTenGTCSessionsWorkflowInput(BaseModel):
+    api_key: str
+    
 
 @workflow.defn
-class FetchSessionsWorkflow:
+class TopTenGTCSessionsWorkflow:
     @workflow.run
-    async def run(self) -> list[Session]:
+    async def run(self, input: TopTenGTCSessionsWorkflowInput) -> list[Session]:
+        api_key = input.api_key
         min_sessions = []
         offset = None
 
@@ -47,7 +52,7 @@ class FetchSessionsWorkflow:
             # save some time by filtering out sessions that are not relevant
             filtered_sessions = await workflow.execute_activity(
                 filter_sessions,
-                FilterSessionsInput(sessions=english_sessions, api_key=CENTML_API_KEY),
+                FilterSessionsInput(sessions=english_sessions, api_key=api_key),
                 start_to_close_timeout=timedelta(seconds=300),
             )
 
@@ -56,7 +61,7 @@ class FetchSessionsWorkflow:
             # Process the new sessions            
             min_sessions = await workflow.execute_activity(
                 process_sessions,
-                ProcessSessionsInput(min_sessions=min_sessions, new_sessions=filtered_sessions, api_key=CENTML_API_KEY),
+                ProcessSessionsInput(min_sessions=min_sessions, new_sessions=filtered_sessions, api_key=api_key),
                 start_to_close_timeout=timedelta(seconds=600),
             )
 
