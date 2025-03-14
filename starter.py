@@ -3,6 +3,7 @@ from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
 import json
 import os
+from activities import Session
 
 # Import the workflow from your worker.py file (assuming it's in the same directory)
 from workflows import TopTenGTCSessionsWorkflow, TopTenGTCSessionsWorkflowInput
@@ -16,14 +17,14 @@ async def main():
 
     # Run the workflow and get the result
     try:
-        result = await client.execute_workflow(
+        result: list[Session] = await client.execute_workflow(
             TopTenGTCSessionsWorkflow.run,  # Pass the workflow run function
             TopTenGTCSessionsWorkflowInput(api_key=CENTML_API_KEY),  # Pass the workflow input
             id="fetch-sessions-workflow-id",  # Use 'id=' keyword argument for workflow ID
             task_queue="fetch-sessions-queue",
         )
 
-        print(json.dumps(result)) # Print the list of sessions
+        print(json.dumps([session.model_dump() for session in result])) # Print the list of sessions
 
     except Exception as e:
         print(f"Error running workflow: {e}")
