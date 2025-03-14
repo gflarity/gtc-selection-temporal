@@ -1,14 +1,20 @@
-from pydantic import BaseModel
-import aiohttp
-from temporalio import activity
-from typing import Optional, List
-from datetime import timedelta
-import openai
-import json
-import asyncio
-import string
+"""Module for processing and filtering GTC conference sessions based 
+on AI/ML system optimization relevance."""
 
-# Note: 'timedelta' is imported but not used in this file. It may be a leftover from previous iterations.
+import asyncio
+import json
+import string
+from typing import List, Optional
+
+import aiohttp
+import openai
+from pydantic import BaseModel
+from temporalio import activity
+class Prompt(BaseModel):
+    """Configuration for LLM prompting."""
+    system_prompt: str
+    user_prompt_template: str
+    model: str = "deepseek-ai/DeepSeek-R1"
 
 class Session(BaseModel):
     """Represents a GTC conference session with essential metadata."""
@@ -21,6 +27,13 @@ class ProcessSessionsInput(BaseModel):
     min_sessions: list[Session]  # Current list of top sessions (sorted by relevance)
     new_sessions: list[Session]  # New sessions to evaluate and potentially add
     api_key: str                 # API key for CentML Serverless API
+    prompt: Prompt
+
+class FilterSessionsInput(BaseModel):
+    """Input model for the filter_sessions activity."""
+    sessions: List[Session]  # List of sessions to filter
+    api_key: str             # API key for CentML Serverless API
+    prompt: Prompt
 
 async def complete_with_schema(
     api_key: str,
@@ -42,7 +55,8 @@ async def complete_with_schema(
         schema (dict): JSON schema that the response must follow.
         system_prompt (str): Base system prompt for the AI model.
         user_prompt (str): Specific prompt provided by the user.
-        model (str, optional): Model identifier for CentML Serverless API. Defaults to "meta-llama/Llama-3.3-70B-Instruct".
+        model (str, optional): Model identifier for CentML Serverless API. Defaults to 
+                               "meta-llama/Llama-3.3-70B-Instruct".
 
     Returns:
         tuple[str, str | None]: A tuple containing:
@@ -79,23 +93,34 @@ async def complete_with_schema(
 # Cache for storing comparison results to avoid redundant API calls
 cache = {}
 
-async def compare_sessions(api_key: str, a: Session, b: Session) -> int:
-    """
-    Compares two sessions to determine which better discusses AI/ML system optimizations.
+async def process_session_filter(api_key: str, session: Session, prompt: Prompt) -> bool:
+    """Filter a single session based on relevance criteria."""
+    schema = {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {"result": {"type": "boolean"}},
+        "required": ["result"],
+        "additionalProperties": False,
+    }
+    
+    user_prompt = prompt.user_prompt_template.format(
+        title=session.title,
+        abstract=session.abstract
+    )
+    
+    content, reasoning = await complete_with_schema(
+        api_key, "https://api.centml.com/openai/v1", schema, 
+        prompt.system_prompt, user_prompt, prompt.model
+    )
+    
+    print("abstract", session.abstract)
+    print("filter reasoning", reasoning)
+    print("filter content", content)
+    obj = json.loads(content)
+    return obj["result"]
 
-    Uses CentML's Serverless API to evaluate session titles and abstracts based on criteria favoring
-    academic, technical discussions over promotional content. Results are cached.
-
-    Args:
-        api_key (str): API key for CentML Serverless API.
-        a (Session): First session to compare.
-        b (Session): Second session to compare.
-
-    Returns:
-        int: Comparison result where:
-            - -1 means 'a' is more relevant than 'b'.
-            - 1 means 'b' is more relevant or equal to 'a'.
-    """
+async def compare_sessions(api_key: str, a: Session, b: Session, prompt: Prompt) -> int:
+    """Compare two sessions to determine which is more relevant."""
     # Generate bidirectional cache keys
     key_ab = f"{a.sessionID}_{b.sessionID}"
     key_ba = f"{b.sessionID}_{a.sessionID}"
@@ -108,7 +133,6 @@ async def compare_sessions(api_key: str, a: Session, b: Session) -> int:
         print(f"Cache hit for {b.title} vs. {a.title}")
         return -cache[key_ba]
 
-    # Schema for expected comparison result
     schema = {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
@@ -117,41 +141,24 @@ async def compare_sessions(api_key: str, a: Session, b: Session) -> int:
         "additionalProperties": False,
     }
 
-    system_prompt = "You are an expert at comparing GTC conference sessions given their titles and abstracts."
-    model = "deepseek-ai/DeepSeek-R1"
-    user_prompt = (
-        f"You will analyze Titles & Abstracts of two GTC sessions (A and B) to determine which better emphasizes an academic discussions of techniques that lead to cost reduction and/or improved time/resource efficiency in AI/ML workflows, deployments, or applications."
-        f"Prioritize abstacts that include evidence of concrete benefits over superficial buzz.\n"
-        f"Avoid sessions that involve hyperbole/pricing-focused selling\n"
-        f"Include sessions that seem to apply broadly (multiple domains or framework-agnostic) rather than niche/hardware-specific optimizations or verticals.\n"
-        f"Penalize vague/generic phrases; reward specific frameworks, real-world examples, and caveats acknowledging limits.\n\n"
-        f"Template for Analysis\n"
-        f"Step-by-Step Instructions:\n\n"
-        f"Analyze Criteria for Section A - Assign scores ((1-5): Cost/Efficiency Emphasis | Avoidance of Self-Promotion | Accessibility Generality | Supported Claims.\n\n"
-        f"Analyze Criteria for Section B - Same framework.\n"
-        f"(Compare relative strengths for each criteria).\n\n"
-        f"Make Final Call. Consider:\n\n"
-        f"• It must be related to AI/ML systems engineering, no using AI/ML to solve some problems such as autonomous driving, or cancer etc.\n"
-        f"• Does A/B discuss actual financial metrics (e.g., 20%↑ inference speed) rather than ROI hype?\n"
-        f"• If A focuses on custom ASIC chip design & B improves PyTorch pipeline design → B has wider ML impact.\n\n"
-        f"VERDICT Format → {{-1 if A>B, 1 if B>=A}}: {{Return only \"-1\" or \"1\" without explanation.}}\n\n"
-        f"Sessions Provided: "
-        f"Title for paper a: ```{a.title}``` "
-        f"Abstract for paper a: ```{a.abstract}``` "
-        f"Title for paper b: ```{b.title}``` "
-        f"Abstract for paper b: ```{b.abstract}```"
+    user_prompt = prompt.user_prompt_template.format(
+        title_a=a.title,
+        abstract_a=a.abstract,
+        title_b=b.title,
+        abstract_b=b.abstract
     )
 
     print(f"Comparing {a.title} with {b.title}")
     content, reasoning = await complete_with_schema(
-        api_key, "https://api.centml.com/openai/v1", schema, system_prompt, user_prompt, model
+        api_key, "https://api.centml.com/openai/v1", schema,
+        prompt.system_prompt, user_prompt, prompt.model
     )
 
     print("reasoning", reasoning)
     print("content", content)
     obj = json.loads(content)
     result = obj["result"]
-    cache[key_ab] = result  # Cache the result
+    cache[key_ab] = result
     return result
 
 class FetchSessionsInput(BaseModel):
@@ -251,11 +258,6 @@ async def async_filter(arr: list, predicate, concurrency: int = 1) -> list:
     await asyncio.gather(*workers)
     return [item for idx, item in enumerate(arr) if results[idx]]
 
-class FilterSessionsInput(BaseModel):
-    """Input model for the filter_sessions activity."""
-    sessions: List[Session]  # List of sessions to filter
-    api_key: str             # API key for CentML Serverless API
-
 @activity.defn
 async def filter_sessions(filter_sessions_input: FilterSessionsInput) -> List[Session]:
     """
@@ -272,78 +274,12 @@ async def filter_sessions(filter_sessions_input: FilterSessionsInput) -> List[Se
     """
     filtered_sessions = await async_filter(
         filter_sessions_input.sessions,
-        predicate=lambda session: process_session_filter(filter_sessions_input.api_key, session),
+        predicate=lambda session: process_session_filter(filter_sessions_input.api_key, session, filter_sessions_input.prompt),
         concurrency=3  # Process 3 sessions concurrently
     )
     return filtered_sessions
 
-async def process_session_filter(api_key: str, session: Session) -> bool:
-    """
-    Determines if a session meets criteria for AI/ML system optimization discussions.
-
-    Evaluates a session's title and abstract using CentML's Serverless API against predefined criteria.
-
-    Args:
-        api_key (str): API key for CentML Serverless API.
-        session (Session): Session to evaluate.
-
-    Returns:
-        bool: True if the session meets the criteria, False otherwise.
-    """
-    schema = {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "type": "object",
-        "properties": {"result": {"type": "boolean"}},
-        "required": ["result"],
-        "additionalProperties": False,
-    }
-    system_prompt = "You are an expert at evaluating AI/ML conference sessions, specifically focusing on identifying sessions that discuss optimizations of AI/ML systems themselves."
-    user_prompt = (
-        f"Analyze the following GTC session title and abstract. Determine if it meets MANY of the following criteria for inclusion:\n\n"
-        f"**Core Focus**: The session must explicitly address technical methods for optimizing the computational efficiency of AI/ML systems themselves. This includes:\n"
-        f"- Reducing computational costs (e.g., energy, hardware, cloud expenses) of AI/ML models or training processes.\n"
-        f"- Improving efficiency (e.g., faster training, optimized inference, reduced latency, smaller models).\n"
-        f"- Techniques such as quantization, pruning, sparsity, distillation, parallelization, or novel architectures aimed at making AI/ML systems more efficient.\n\n"
-        f"**Important**: The session must focus on improving the AI/ML techniques or systems, not on applying AI/ML to optimize other domains or processes.\n\n"
-        f"**Technical Depth**: The session should:\n"
-        f"- Mention frameworks/libraries (e.g., TensorFlow, PyTorch, CUDA) or tools (e.g., Triton, TensorRT) used in the optimization process.\n"
-        f"- Describe algorithms, workflows, or provide measurable results (e.g., '40% fewer FLOPs,' '2x speedup on A100') related to AI/ML system optimization.\n"
-        f"- Avoid vague claims (e.g., 'revolutionary,' 'industry-leading') without technical justification.\n\n"
-        f"**Exclusion Rules**: Reject sessions that:\n"
-        f"- Avoid workshop sessions, ie those that include 'Learn how to'\n"
-        f"- Avoid session that Focus on applying AI/ML to optimize other domains or processes, rather than optimizing the AI/ML systems themselves.\n"
-        f"- Avoid sessions that are product demos, company announcements, or partnerships without technical detail on AI/ML optimization.\n"
-        f"- Use excessive marketing language (e.g., 'transform your business,' 'exclusive solution').\n"
-        f"- Lack concrete methodologies for AI/ML optimization (e.g., only high-level use cases, no benchmarks).\n\n"
-        f"**Examples**:\n"
-        f"**Included**:\n"
-        f"Title: 'Dynamic Sparsity for Efficient Transformer Training'\n"
-        f"Abstract: 'We present a PyTorch-based method to dynamically prune attention heads during training, reducing memory usage by 35% on GPT-3-scale models without accuracy loss.'\n"
-        f"→ Rationale: Focuses on optimizing an AI/ML system (transformer training) with technical details (pruning, PyTorch, 35% memory reduction).\n\n"
-        f"**Excluded**:\n"
-        f"Title: 'Using AI to Optimize Energy Consumption in Data Centers'\n"
-        f"Abstract: 'Learn how our AI-powered platform can reduce energy costs by predicting and optimizing data center cooling systems.'\n"
-        f"→ Rationale: Focuses on applying AI to optimize data center energy use, not on optimizing the AI system itself.\n\n"
-        f"**Another Excluded**:\n"
-        f"Title: 'Accelerate AI with XYZ Corporation’s Cloud Platform'\n"
-        f"Abstract: 'Discover how our industry-leading platform empowers teams to deploy models faster and cut costs!'\n"
-        f"→ Rationale: Lacks technical details on AI/ML optimization methods; uses promotional language.\n\n"
-        f"**Session to Evaluate**:\n"
-        f"Title: ``` {session.title} ```\n"
-        f"Abstract: ``` {session.abstract} ```\n"
-        f"Based on the criteria above, should this session be included? Provide a brief justification.\n"
-    )
-    model = "deepseek-ai/DeepSeek-R1"
-    content, reasoning = await complete_with_schema(
-        api_key, "https://api.centml.com/openai/v1", schema, system_prompt, user_prompt, model
-    )
-    print("abstract", session.abstract)
-    print("filter reasoning", reasoning)
-    print("filter content", content)
-    obj = json.loads(content)
-    return obj["result"]
-
-async def find_insertion_point(api_key: str, min_sessions: list[Session], new_session: Session) -> int:
+async def find_insertion_point(api_key: str, min_sessions: list[Session], new_session: Session, prompt: Prompt) -> int:
     """
     Finds the insertion point for a new session in a sorted list using binary search.
 
@@ -354,6 +290,7 @@ async def find_insertion_point(api_key: str, min_sessions: list[Session], new_se
         api_key (str): API key for CentML Serverless API.
         min_sessions (list[Session]): Sorted list of top sessions.
         new_session (Session): Session to insert.
+        prompt (Prompt): Prompt configuration for session comparison.
 
     Returns:
         int: Index where new_session should be inserted.
@@ -362,7 +299,7 @@ async def find_insertion_point(api_key: str, min_sessions: list[Session], new_se
     right = len(min_sessions)
     while left < right:
         mid = (left + right) // 2
-        if await compare_sessions(api_key, new_session, min_sessions[mid]) == -1:  # new_session > mid
+        if await compare_sessions(api_key, new_session, min_sessions[mid], prompt) == -1:  # new_session > mid
             right = mid
         else:
             left = mid + 1
@@ -370,22 +307,7 @@ async def find_insertion_point(api_key: str, min_sessions: list[Session], new_se
 
 @activity.defn
 async def process_sessions(input: ProcessSessionsInput) -> List[Session]:
-    """
-    Maintains a list of the top 10 most relevant sessions.
-
-    Evaluates new sessions and inserts them into a sorted list if they rank among the top 10.
-    Part of a Temporal.io workflow.
-
-    Note: Contains a potential bug in the comparison condition. Should likely check if
-    new_session > min_sessions[-1] (i.e., compare_sessions returns -1) to include it,
-    but currently checks == 1 and has a typo using new_sessions[-1].
-
-    Args:
-        input (ProcessSessionsInput): Input with current top sessions, new sessions, and API key.
-
-    Returns:
-        List[Session]: Updated list of top sessions (max 10).
-    """
+    """Maintains a list of the top 10 most relevant sessions."""
     min_sessions = input.min_sessions
     new_sessions = input.new_sessions
     api_key = input.api_key
@@ -394,14 +316,11 @@ async def process_sessions(input: ProcessSessionsInput) -> List[Session]:
         if len(min_sessions) == 0:
             min_sessions.append(new_session)
         elif len(min_sessions) < 10:
-            pos = await find_insertion_point(api_key, min_sessions, new_session)
+            pos = await find_insertion_point(api_key, min_sessions, new_session, input.prompt)
             min_sessions.insert(pos, new_session)
         else:
-            # Bug: Should be 'new_session' not 'new_sessions[-1]', and condition should be == -1
-            # Current: if min_sessions[-1] >= new_session, which incorrectly triggers insertion
-            # Should be: if new_session > min_sessions[-1] (i.e., == -1)
-            if await compare_sessions(api_key, new_sessions[-1], min_sessions[-1]) == 1:
-                pos = await find_insertion_point(api_key, min_sessions, new_session)
+            if await compare_sessions(api_key, new_session, min_sessions[-1], input.prompt) == -1:
+                pos = await find_insertion_point(api_key, min_sessions, new_session, input.prompt)
                 min_sessions.insert(pos, new_session)
                 min_sessions.pop(-1)  # Remove least relevant session
     return min_sessions

@@ -1,24 +1,50 @@
-from temporalio import workflow
+"""Workflow for fetching and filtering GTC conference sessions.
+
+This workflow orchestrates the process of:
+1. Fetching sessions from the GTC conference API in batches
+2. Filtering out non-English sessions
+3. Evaluating sessions for AI/ML system optimization relevance
+4. Maintaining a sorted list of the top most relevant sessions
+
+The workflow uses multiple activities to process the sessions:
+- fetch_sessions: Retrieves batches of sessions from the API
+- filter_non_english_sessions: Removes non-English language sessions
+- filter_sessions: Evaluates sessions for AI/ML optimization relevance
+- process_sessions: Maintains sorted list of top relevant sessions
+
+Returns:
+    list[Session]: The top most relevant sessions discussing AI/ML system optimization
+"""
+
 from datetime import timedelta
-import os
+
 from pydantic import BaseModel
+from temporalio import workflow
 
 with workflow.unsafe.imports_passed_through(): # Mark activities import as pass-through
-    from activities import fetch_sessions, FetchSessionsInput, Session
-    from activities import filter_sessions, FilterSessionsInput
-    from activities import process_sessions, ProcessSessionsInput, ProcessSessionsInput
-    from activities import filter_non_english_sessions, FilterNonEnglishSessionsInput
+    from activities import (FetchSessionsInput, FilterNonEnglishSessionsInput,
+                            FilterSessionsInput, ProcessSessionsInput, Prompt,
+                            Session, fetch_sessions,
+                            filter_non_english_sessions, filter_sessions,
+                            process_sessions)
 
 
 class TopTenGTCSessionsWorkflowInput(BaseModel):
-    api_key: str
+    """Input model for the GTC session filtering workflow.
     
+    Contains API key and prompt configurations for filtering and comparing sessions."""
+    api_key: str
+    filter_prompt: Prompt
+    compare_prompt: Prompt
+
 
 @workflow.defn
 class TopTenGTCSessionsWorkflow:
+    """Workflow for fetching, filtering, and ranking GTC sessions by AI/ML system optimization relevance."""
     @workflow.run
-    async def run(self, input: TopTenGTCSessionsWorkflowInput) -> list[Session]:
-        api_key = input.api_key
+    async def run(self, workflow_input: TopTenGTCSessionsWorkflowInput) -> list[Session]:
+        """Execute workflow to fetch and rank GTC sessions, returning the top most relevant ones."""
+        api_key = workflow_input.api_key
         min_sessions = []
         offset = None
 
@@ -52,7 +78,11 @@ class TopTenGTCSessionsWorkflow:
             # save some time by filtering out sessions that are not relevant
             filtered_sessions = await workflow.execute_activity(
                 filter_sessions,
-                FilterSessionsInput(sessions=english_sessions, api_key=api_key),
+                FilterSessionsInput(
+                    sessions=english_sessions,
+                    api_key=api_key,
+                    prompt=workflow_input.filter_prompt
+                ),
                 start_to_close_timeout=timedelta(seconds=300),
             )
 
@@ -61,7 +91,12 @@ class TopTenGTCSessionsWorkflow:
             # Process the new sessions            
             min_sessions = await workflow.execute_activity(
                 process_sessions,
-                ProcessSessionsInput(min_sessions=min_sessions, new_sessions=filtered_sessions, api_key=api_key),
+                ProcessSessionsInput(
+                    min_sessions=min_sessions,
+                    new_sessions=filtered_sessions,
+                    api_key=api_key,
+                    prompt=workflow_input.compare_prompt
+                ),
                 start_to_close_timeout=timedelta(seconds=600),
             )
 
