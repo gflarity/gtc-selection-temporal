@@ -14,7 +14,7 @@ class Prompt(BaseModel):
     """Configuration for LLM prompting."""
     system_prompt: str
     user_prompt_template: str
-    model: str = "deepseek-ai/DeepSeek-R1"
+    model: str
 
 class Session(BaseModel):
     """Represents a GTC conference session with essential metadata."""
@@ -41,7 +41,7 @@ async def complete_with_schema(
     schema: dict,
     system_prompt: str,
     user_prompt: str,
-    model: str = "meta-llama/Llama-3.3-70B-Instruct"
+    model: str,
 ) -> tuple[str, str | None]:
     """
     Performs a LLM completion with a specified JSON schema.
@@ -55,9 +55,7 @@ async def complete_with_schema(
         schema (dict): JSON schema that the response must follow.
         system_prompt (str): Base system prompt for the AI model.
         user_prompt (str): Specific prompt provided by the user.
-        model (str, optional): Model identifier for CentML Serverless API. Defaults to 
-                               "meta-llama/Llama-3.3-70B-Instruct".
-
+        model (str): Model identifier for CentML Serverless API. 
     Returns:
         tuple[str, str | None]: A tuple containing:
             - The response content as a JSON string.
@@ -85,6 +83,7 @@ async def complete_with_schema(
 
     content = response.choices[0].message.content
     if not content:
+        print(response)
         raise Exception("Failed to generate a response.")
 
     reasoning = getattr(response.choices[0].message, 'reasoning_content', None)

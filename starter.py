@@ -95,12 +95,14 @@ async def main():
 
     filter_prompt = Prompt(
         system_prompt=FILTER_SYSTEM_PROMPT,
-        user_prompt_template=FILTER_USER_PROMPT_TEMPLATE
+        user_prompt_template=FILTER_USER_PROMPT_TEMPLATE,
+        model="deepseek-ai/DeepSeek-R1"
     )
     
     compare_prompt = Prompt(
         system_prompt=COMPARE_SYSTEM_PROMPT,
-        user_prompt_template=COMPARE_USER_PROMPT_TEMPLATE
+        user_prompt_template=COMPARE_USER_PROMPT_TEMPLATE, 
+        model="deepseek-ai/DeepSeek-R1"
     )
 
     # Run the workflow and get the result
